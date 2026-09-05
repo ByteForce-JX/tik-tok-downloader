@@ -1,3 +1,4 @@
+# app.py - TikTok downloader with proxy and fallbacks (fully functional for Vercel)
 import os
 import re
 import json
@@ -27,6 +28,7 @@ HTML_TEMPLATE = """
         .photo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); gap: 8px; margin-top: 10px; }
         .photo-grid img { width: 100%; border-radius: 6px; cursor: pointer; }
         #loading { display: none; margin-top: 10px; }
+        .error-msg { color: #fe2c55; margin-top: 10px; }
     </style>
 </head>
 <body>
@@ -40,6 +42,7 @@ HTML_TEMPLATE = """
             <a id="downloadBtn" class="download-link" href="" target="_blank">Descargar Sin Marca</a>
             <div id="photoGrid" class="photo-grid"></div>
         </div>
+        <div id="errorMsg" class="error-msg"></div>
     </div>
     <script>
         async function descargar() {
@@ -47,6 +50,7 @@ HTML_TEMPLATE = """
             if(!url) return alert("Pega un link válido");
             document.getElementById('loading').style.display = 'block';
             document.getElementById('result').style.display = 'none';
+            document.getElementById('errorMsg').innerText = '';
             try {
                 const res = await fetch('/download', {
                     method: 'POST',
@@ -93,7 +97,7 @@ HTML_TEMPLATE = """
                 document.getElementById('loading').style.display = 'none';
                 document.getElementById('result').style.display = 'block';
             } catch(e) {
-                alert("Error: " + e.message);
+                document.getElementById('errorMsg').innerText = 'Error: ' + e.message;
                 document.getElementById('loading').style.display = 'none';
             }
         }
@@ -112,7 +116,7 @@ def get_cookie_file():
         return cookie_path
     return None
 
-# Proxy endpoint to serve media with correct headers
+# Proxy endpoint to serve media with correct headers and handle redirects
 @app.route('/proxy')
 def proxy():
     target_url = request.args.get('url')
@@ -131,20 +135,26 @@ def proxy():
     headers = {
         'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
         'Referer': 'https://www.tiktok.com/',
-        'Accept': 'video/mp4,image/*,*/*;q=0.8'
+        'Accept': 'video/mp4,image/*,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
     }
     try:
-        # Stream the content from the target URL
-        resp = requests.get(target_url, headers=headers, stream=True, timeout=30)
+        # Use stream=True and allow redirects
+        resp = requests.get(target_url, headers=headers, stream=True, timeout=30, allow_redirects=True)
         if resp.status_code != 200:
-            return jsonify({'error': f'Proxy fetch failed with status {resp.status_code}'}), 500
+            # Try with a different User-Agent if 403
+            if resp.status_code == 403:
+                headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                resp = requests.get(target_url, headers=headers, stream=True, timeout=30, allow_redirects=True)
+            if resp.status_code != 200:
+                return jsonify({'error': f'Proxy fetch failed with status {resp.status_code}'}), 500
 
         def generate():
             for chunk in resp.iter_content(chunk_size=8192):
                 if chunk:
                     yield chunk
         response = Response(stream_with_context(generate()), content_type=content_type)
-        # Force download as attachment (optional)
+        # Optionally force download
         # response.headers['Content-Disposition'] = f'attachment; filename="media.{ext}"'
         return response
     except Exception as e:
@@ -222,6 +232,23 @@ def fetch_tiktok_media(url):
                                 'type': 'photo',
                                 'photos': images,
                                 'thumbnail': images[0],
+                                'title': data['data'].get('title', '')
+                            }
+            except:
+                pass
+            # Fallback 3: try another API (SnapTik)
+            try:
+                api_url2 = f"https://api.snap-tik.com/api?url={url}"
+                resp = requests.get(api_url2, timeout=10)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data.get('success') and data.get('data'):
+                        video_url = data['data'].get('video')
+                        if video_url:
+                            return {
+                                'type': 'video',
+                                'url': video_url,
+                                'thumbnail': data['data'].get('cover'),
                                 'title': data['data'].get('title', '')
                             }
             except:
@@ -311,6 +338,10 @@ def download():
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route('/health')
+def health():
+    return jsonify({"status": "ok"})
 
 if __name__ == '__main__':
     app.run(debug=False, host='0.0.0.0', port=5000)
