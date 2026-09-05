@@ -1,13 +1,13 @@
-# app.py - ÐŸÐ¾Ð»Ð½Ð¾Ñ†ÐµÐ½Ð½Ñ‹Ð¹ Ð·Ð°Ð³Ñ€ÑƒÐ·Ñ‡Ð¸Ðº TikTok (Ð²Ð¸Ð´ÐµÐ¾ Ð¸ Ñ„Ð¾Ñ‚Ð¾) Ñ Ð¿Ð¾Ð´Ð´ÐµÑ€Ð¶ÐºÐ¾Ð¹ cookie Ð¸ Ñ„ÐµÐ¹Ð»Ð±ÑÐºÐ¾Ð²
 import os
+import re
 import json
 import requests
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify, render_template_string, Response, stream_with_context
 import yt_dlp
 
 app = Flask(__name__)
 
-# HTML-ÑˆÐ°Ð±Ð»Ð¾Ð½ (Ð°Ð´Ð°Ð¿Ñ‚Ð¸Ñ€Ð¾Ð²Ð°Ð½ Ð´Ð»Ñ Ð²Ð¸Ð´ÐµÐ¾ Ð¸ Ñ„Ð¾Ñ‚Ð¾)
+# HTML template with proxy integration
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="es">
@@ -17,7 +17,7 @@ HTML_TEMPLATE = """
     <title>TikTok Saver Pro</title>
     <style>
         body { font-family: sans-serif; background: #000; color: white; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; padding: 20px; box-sizing: border-box; }
-        .card { background: #111; padding: 25px; border-radius: 15px; width: 90%; max-width: 400px; text-align: center; border: 1px solid #fe2c55; }
+        .card { background: #111; padding: 25px; border-radius: 15px; width: 90%; max-width: 420px; text-align: center; border: 1px solid #fe2c55; }
         input { width: 100%; padding: 12px; margin-bottom: 15px; border-radius: 8px; border: none; box-sizing: border-box; }
         button { background: #fe2c55; color: white; border: none; padding: 12px; width: 100%; border-radius: 8px; font-weight: bold; cursor: pointer; }
         #result { display: none; margin-top: 20px; }
@@ -26,6 +26,7 @@ HTML_TEMPLATE = """
         .download-link { display: inline-block; background: #25f4ee; color: black; padding: 10px 20px; margin-top: 10px; border-radius: 8px; text-decoration: none; font-weight: bold; }
         .photo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); gap: 8px; margin-top: 10px; }
         .photo-grid img { width: 100%; border-radius: 6px; cursor: pointer; }
+        #loading { display: none; margin-top: 10px; }
     </style>
 </head>
 <body>
@@ -33,7 +34,7 @@ HTML_TEMPLATE = """
         <h2>TikTok <span style="color:#fe2c55">Saver</span></h2>
         <input type="text" id="url" placeholder="Pega el link de TikTok (video o foto)">
         <button onclick="descargar()">Obtener Contenido</button>
-        <div id="loading" style="display:none; margin-top:10px;">⚡ Procesando...</div>
+        <div id="loading">⚡ Procesando...</div>
         <div id="result">
             <div id="mediaContainer" class="media-container"></div>
             <a id="downloadBtn" class="download-link" href="" target="_blank">Descargar Sin Marca</a>
@@ -42,8 +43,8 @@ HTML_TEMPLATE = """
     </div>
     <script>
         async function descargar() {
-            const url = document.getElementById('url').value;
-            if(!url) return alert("Pega un link");
+            const url = document.getElementById('url').value.trim();
+            if(!url) return alert("Pega un link válido");
             document.getElementById('loading').style.display = 'block';
             document.getElementById('result').style.display = 'none';
             try {
@@ -59,32 +60,35 @@ HTML_TEMPLATE = """
                 const downloadBtn = document.getElementById('downloadBtn');
                 container.innerHTML = '';
                 grid.innerHTML = '';
+                // Construir URL del proxy
+                const proxyUrl = (raw) => '/proxy?url=' + encodeURIComponent(raw);
                 if(data.type === 'photo') {
                     if(data.photos && data.photos.length > 0) {
                         data.photos.forEach((p, i) => {
                             const img = document.createElement('img');
-                            img.src = p;
+                            img.src = proxyUrl(p);
                             img.alt = 'Foto ' + (i+1);
                             grid.appendChild(img);
                         });
                         const mainImg = document.createElement('img');
-                        mainImg.src = data.photos[0];
+                        mainImg.src = proxyUrl(data.photos[0]);
                         container.appendChild(mainImg);
-                        downloadBtn.href = data.photos[0];
+                        downloadBtn.href = proxyUrl(data.photos[0]);
                     } else {
                         const img = document.createElement('img');
-                        img.src = data.url;
+                        img.src = proxyUrl(data.url);
                         container.appendChild(img);
-                        downloadBtn.href = data.url;
+                        downloadBtn.href = proxyUrl(data.url);
                     }
                 } else {
+                    // Video
                     const video = document.createElement('video');
-                    video.src = data.url;
+                    video.src = proxyUrl(data.url);
                     video.controls = true;
                     video.autoplay = false;
                     video.style.width = '100%';
                     container.appendChild(video);
-                    downloadBtn.href = data.url;
+                    downloadBtn.href = proxyUrl(data.url);
                 }
                 document.getElementById('loading').style.display = 'none';
                 document.getElementById('result').style.display = 'block';
@@ -98,21 +102,58 @@ HTML_TEMPLATE = """
 </html>
 """
 
-# Ð¤ÑƒÐ½ÐºÑ†Ð¸Ñ Ð´Ð»Ñ Ð¿Ð¾Ð»ÑƒÑ‡ÐµÐ½Ð¸Ñ cookie Ð¸Ð· Ð¿ÐµÑ€ÐµÐ¼ÐµÐ½Ð½Ð¾Ð¹ Ð¾ÐºÑ€ÑƒÐ¶ÐµÐ½Ð¸Ñ (Ð´Ð»Ñ Vercel)
+# Cookie helper
 def get_cookie_file():
     cookie_data = os.environ.get('TIKTOK_COOKIES')
     if cookie_data:
-        # Vercel Ñ€Ð°Ð·Ñ€ÐµÑˆÐ°ÐµÑ‚ Ð·Ð°Ð¿Ð¸ÑÑŒ Ñ‚Ð¾Ð»ÑŒÐºÐ¾ Ð² /tmp
         cookie_path = '/tmp/cookies.txt'
         with open(cookie_path, 'w') as f:
             f.write(cookie_data)
         return cookie_path
     return None
 
-# ÐžÑÐ½Ð¾Ð²Ð½Ð¾Ð¹ Ñ„ÑƒÐ½ÐºÑ†Ð¸Ð¾Ð½Ð°Ð» Ñ Ð¿Ð¾Ð²Ñ‚Ð¾Ñ€Ð½Ñ‹Ð¼Ð¸ Ð¿Ð¾Ð¿Ñ‹Ñ‚ÐºÐ°Ð¼Ð¸ Ð¸ Ñ„ÐµÐ¹Ð»Ð±ÑÐºÐ¾Ð¼
+# Proxy endpoint to serve media with correct headers
+@app.route('/proxy')
+def proxy():
+    target_url = request.args.get('url')
+    if not target_url:
+        return jsonify({'error': 'Missing url parameter'}), 400
+
+    # Determine content type from extension or fallback
+    ext = target_url.split('.')[-1].lower()
+    if ext in ['mp4', 'mov', 'avi']:
+        content_type = 'video/mp4'
+    elif ext in ['jpg', 'jpeg', 'png', 'webp']:
+        content_type = 'image/jpeg'
+    else:
+        content_type = 'application/octet-stream'
+
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
+        'Referer': 'https://www.tiktok.com/',
+        'Accept': 'video/mp4,image/*,*/*;q=0.8'
+    }
+    try:
+        # Stream the content from the target URL
+        resp = requests.get(target_url, headers=headers, stream=True, timeout=30)
+        if resp.status_code != 200:
+            return jsonify({'error': f'Proxy fetch failed with status {resp.status_code}'}), 500
+
+        def generate():
+            for chunk in resp.iter_content(chunk_size=8192):
+                if chunk:
+                    yield chunk
+        response = Response(stream_with_context(generate()), content_type=content_type)
+        # Force download as attachment (optional)
+        # response.headers['Content-Disposition'] = f'attachment; filename="media.{ext}"'
+        return response
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# Main extraction function with fallbacks
 def fetch_tiktok_media(url):
     cookie_file = get_cookie_file()
-    # Ð‘Ð°Ð·Ð¾Ð²Ñ‹Ðµ Ð¾Ð¿Ñ†Ð¸Ð¸
+    # Primary options with cookies and watermark removal
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
@@ -143,7 +184,7 @@ def fetch_tiktok_media(url):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
     except Exception as e:
-        # ÐŸÐµÑ€Ð²Ñ‹Ð¹ ÑÑ‚Ñ€Ð°Ñ‚ÐµÐ³Ð¸Ñ‡ÐµÑÐºÐ¸Ð¹ Ñ„ÐµÐ¹Ð»Ð±ÑÐº: Ð¿Ñ€Ð¾Ð±ÑƒÐµÐ¼ Ð±ÐµÐ· ÐºÑƒÐºÐ¸, Ð½Ð¾ Ñ Ð±Ð¾Ð»ÐµÐµ Ð»ÑŽÐ±ÐµÑ€Ð°Ð»ÑŒÐ½Ñ‹Ð¼Ð¸ Ð½Ð°ÑÑ‚Ñ€Ð¾Ð¹ÐºÐ°Ð¼Ð¸
+        # Fallback 1: without cookies, with less strict options
         ydl_opts2 = {
             'quiet': True,
             'no_warnings': True,
@@ -160,13 +201,12 @@ def fetch_tiktok_media(url):
             with yt_dlp.YoutubeDL(ydl_opts2) as ydl:
                 info = ydl.extract_info(url, download=False)
         except Exception as e2:
-            # ÐŸÐ¾ÑÐ»ÐµÐ´Ð½Ð¸Ð¹ Ñ„ÐµÐ¹Ð»Ð±ÑÐº: Ð¸ÑÐ¿Ð¾Ð»ÑŒÐ·ÑƒÐµÐ¼ Ð²Ð½ÐµÑˆÐ½ÑŽÑŽ API (TikSave)
-            fallback_url = f"https://www.tiksave.com/api?url={url}"
+            # Fallback 2: external API (TikSave)
+            api_url = f"https://www.tiksave.com/api?url={url}"
             try:
-                resp = requests.get(fallback_url, timeout=10)
+                resp = requests.get(api_url, timeout=10)
                 if resp.status_code == 200:
                     data = resp.json()
-                    # ÐžÐ¶Ð¸Ð´Ð°ÐµÐ¼ Ñ„Ð¾Ñ€Ð¼Ð°Ñ‚ {status: true, data: {video: [ {url: ...} ] } }
                     if data.get('status') and data.get('data'):
                         video_data = data['data'].get('video')
                         if video_data and len(video_data) > 0:
@@ -176,7 +216,6 @@ def fetch_tiktok_media(url):
                                 'thumbnail': data['data'].get('cover'),
                                 'title': data['data'].get('title', '')
                             }
-                        # Ð¢Ð°ÐºÐ¶Ðµ Ð¼Ð¾Ð¶ÐµÑ‚ Ð±Ñ‹Ñ‚ÑŒ Ñ„Ð¾Ñ‚Ð¾
                         images = data['data'].get('images', [])
                         if images:
                             return {
@@ -187,15 +226,15 @@ def fetch_tiktok_media(url):
                             }
             except:
                 pass
-            raise Exception("Ð�Ðµ ÑƒÐ´Ð°Ð»Ð¾ÑÑŒ Ð¿Ð¾Ð»ÑƒÑ‡Ð¸Ñ‚ÑŒ Ð¼ÐµÐ´Ð¸Ð° Ñ‡ÐµÑ€ÐµÐ· yt-dlp Ð¸ Ñ„ÐµÐ¹Ð»Ð±ÑÐº API")
+            raise Exception("All extraction methods failed: " + str(e))
 
-    # ÐžÐ±Ñ€Ð°Ð±Ð¾Ñ‚ÐºÐ° Ð¿Ð¾Ð»ÑƒÑ‡ÐµÐ½Ð½Ð¾Ð¹ Ð¸Ð½Ñ„Ð¾Ñ€Ð¼Ð°Ñ†Ð¸Ð¸ (Ð°Ð½Ð°Ð»Ð¾Ð³Ð¸Ñ‡Ð½Ð¾ Ð¿Ñ€ÐµÐ´Ñ‹Ð´ÑƒÑ‰ÐµÐ¼Ñƒ, Ð½Ð¾ Ñ ÑƒÐ»ÑƒÑ‡ÑˆÐµÐ½Ð¸ÑÐ¼Ð¸)
+    # Parse info for photo/video
     is_photo = False
     photos = []
     video_url = None
     thumbnail = info.get('thumbnail')
 
-    # ÐŸÑ€Ð¾Ð²ÐµÑ€ÐºÐ° Ð½Ð° ÐºÐ°Ñ€Ñ€ÑƒÑÐµÐ»ÑŒ
+    # Check for carousel (entries with thumbnails)
     if 'entries' in info and info['entries']:
         entries = info['entries']
         if entries and 'thumbnails' in entries[0]:
@@ -208,10 +247,10 @@ def fetch_tiktok_media(url):
                 elif 'url' in entry:
                     photos.append(entry['url'])
         else:
-            # ÐœÐ¾Ð¶ÐµÑ‚ Ð±Ñ‹Ñ‚ÑŒ Ð²Ð¸Ð´ÐµÐ¾-ÐºÐ°Ñ€Ñ€ÑƒÑÐµÐ»ÑŒ? ÐžÐ±Ñ‹Ñ‡Ð½Ð¾ Ð½ÐµÑ‚, Ð½Ð¾ Ð¿Ñ€Ð¾Ð²ÐµÑ€Ð¸Ð¼
+            # May be a video playlist? ignore
             pass
 
-    # ÐŸÑ€Ð¾Ð²ÐµÑ€ÐºÐ° Ð½Ð° Ð¾Ð´Ð¸Ð½Ð¾Ñ‡Ð½Ð¾Ðµ Ñ„Ð¾Ñ‚Ð¾
+    # Single photo detection
     if not is_photo and ('formats' not in info or len(info.get('formats', [])) == 0):
         is_photo = True
         if 'thumbnails' in info and info['thumbnails']:
@@ -221,8 +260,9 @@ def fetch_tiktok_media(url):
         elif 'url' in info:
             photos.append(info['url'])
 
-    # Ð•ÑÐ»Ð¸ ÑÑ‚Ð¾ Ñ„Ð¾Ñ‚Ð¾, Ð²Ð¾Ð·Ð²Ñ€Ð°Ñ‰Ð°ÐµÐ¼
     if is_photo and photos:
+        # Clean photo URLs (some may be relative)
+        photos = [p if p.startswith('http') else 'https:' + p if p.startswith('//') else p for p in photos]
         return {
             'type': 'photo',
             'photos': photos,
@@ -230,21 +270,23 @@ def fetch_tiktok_media(url):
             'title': info.get('title', '')
         }
 
-    # Ð’Ð¸Ð´ÐµÐ¾: Ð¿Ñ‹Ñ‚Ð°ÐµÐ¼ÑÑ Ð½Ð°Ð¹Ñ‚Ð¸ download_addr
+    # Video extraction - prioritize download_addr
     formats = info.get('formats', [])
     no_wm_formats = [f for f in formats if 'download_addr' in f.get('format_id', '')]
     if no_wm_formats:
         best = max(no_wm_formats, key=lambda f: f.get('height', 0) * f.get('width', 0) if f.get('height') and f.get('width') else 0)
         video_url = best.get('url')
     else:
-        # ÐŸÑ€Ð¾Ð±ÑƒÐµÐ¼ Ð²Ð·ÑÑ‚ÑŒ Ð¿ÐµÑ€Ð²Ñ‹Ð¹ format Ñ Ð½Ð°Ð¸Ð±Ð¾Ð»ÑŒÑˆÐ¸Ð¼ Ñ€Ð°Ð·Ñ€ÐµÑˆÐµÐ½Ð¸ÐµÐ¼
         if formats:
+            # Prefer format with highest quality and no watermark note
             best_format = max(formats, key=lambda f: f.get('height', 0) * f.get('width', 0) if f.get('height') and f.get('width') else 0)
             video_url = best_format.get('url')
         else:
             video_url = info.get('url')
 
     if video_url:
+        if not video_url.startswith('http'):
+            video_url = 'https:' + video_url if video_url.startswith('//') else video_url
         return {
             'type': 'video',
             'url': video_url,
@@ -252,7 +294,7 @@ def fetch_tiktok_media(url):
             'title': info.get('title', '')
         }
 
-    raise Exception("Ð�Ðµ ÑƒÐ´Ð°Ð»Ð¾ÑÑŒ Ð½Ð°Ð¹Ñ‚Ð¸ URL Ð´Ð»Ñ Ð·Ð°Ð³Ñ€ÑƒÐ·ÐºÐ¸")
+    raise Exception("No downloadable media found")
 
 @app.route('/')
 def index():
