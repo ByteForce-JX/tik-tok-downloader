@@ -1,3 +1,4 @@
+// vercel.json - with increased duration for proxy
 {
   "builds": [
     {
