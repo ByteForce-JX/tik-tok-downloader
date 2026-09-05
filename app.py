@@ -1,4 +1,3 @@
-# app.py - TikTok downloader with proxy and fallbacks (fully functional for Vercel)
 import os
 import re
 import json
