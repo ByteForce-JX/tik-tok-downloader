@@ -1,2 +1,4 @@
+// requirements.txt - add requests for better compatibility
 flask
 yt-dlp
+requests
